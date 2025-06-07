@@ -2,7 +2,6 @@ import curses
 import os
 import signal
 import sys
-from datetime import datetime
 from pathlib import Path
 
 # Task states
@@ -48,9 +47,11 @@ class TodoApp:
         self.stdscr = stdscr
         self.tasks = []
         self.cursor_pos = 0
+        self.view_mode = 0  # 0 = normal, 1 = grouped
         self.ensure_todo_dir()
         self.load_tasks()
         self.history = []  # For undo functionality
+        self.visible_task_indices = []  # Maps displayed tasks to original indices
         
         # Initialize colors
         curses.start_color()
@@ -68,9 +69,7 @@ class TodoApp:
         self.stdscr.keypad(True)
         self.stdscr.timeout(100)  # Makes getch non-blocking with a timeout
         
-        # For shift+j/k detection
-        self.last_key_time = 0
-        self.shift_pressed = False
+        self.last_key = -1
     
     def ensure_todo_dir(self):
         # Create the directory if it doesn't exist
@@ -125,11 +124,9 @@ class TodoApp:
         curses.echo()
         curses.curs_set(1)  # Show cursor
         
-        # Display prompt
         self.stdscr.addstr(h-3, 2, "Enter new task: ")
         self.stdscr.refresh()
         
-        # Get input
         curses.curs_set(1)
         input_win.clear()
         task_text = input_win.getstr().decode('utf-8')
@@ -142,27 +139,68 @@ class TodoApp:
             self.cursor_pos = len(self.tasks) - 1
             self.save_tasks()
     
-    def toggle_task_state(self):
+    def toggle_task_state_simple(self):
+        """Toggle between white (TODO) and green (DONE) only - for spacebar and alt"""
         if not self.tasks:
+            return
+        
+        # If in grouped view, map cursor position to actual task index
+        task_index = self.get_actual_task_index()
+        if task_index == -1:
             return
             
         self.add_to_history()
-        # Cycle through states: TODO (white) -> DOING (yellow) -> DONE (green) -> IMPORTANT (red)
-        self.tasks[self.cursor_pos].state = (self.tasks[self.cursor_pos].state + 1) % 4
+        # Cycle between TODO and DONE only
+        if self.tasks[task_index].state == TODO:
+            self.tasks[task_index].state = DONE
+        else:
+            self.tasks[task_index].state = TODO
         self.save_tasks()
+    
+    def cycle_all_states(self):
+        """Cycle through all 4 states - for 'o' key"""
+        if not self.tasks:
+            return
+            
+        # If in grouped view, map cursor position to actual task index
+        task_index = self.get_actual_task_index()
+        if task_index == -1:
+            return
+            
+        self.add_to_history()
+        # Cycle through all states: TODO -> DOING -> DONE -> IMPORTANT -> TODO
+        self.tasks[task_index].state = (self.tasks[task_index].state + 1) % 4
+        self.save_tasks()
+    
+    def toggle_view_mode(self):
+        """Toggle between normal and grouped view modes"""
+        self.view_mode = (self.view_mode + 1) % 2
+        # Reset cursor position when changing views
+        self.cursor_pos = min(self.cursor_pos, len(self.tasks) - 1 if self.tasks else 0)
     
     def delete_task(self):
         if not self.tasks:
             return
             
+        # If in grouped view, map cursor position to actual task index
+        task_index = self.get_actual_task_index()
+        if task_index == -1:
+            return
+            
         self.add_to_history()
-        del self.tasks[self.cursor_pos]
-        if self.cursor_pos >= len(self.tasks) and len(self.tasks) > 0:
-            self.cursor_pos = len(self.tasks) - 1
+        del self.tasks[task_index]
+        
+        # Adjust cursor position if needed
+        if self.cursor_pos >= len(self.visible_task_indices) and self.visible_task_indices:
+            self.cursor_pos = len(self.visible_task_indices) - 1
         self.save_tasks()
     
     def move_task(self, direction):
         if not self.tasks or len(self.tasks) < 2:
+            return
+            
+        # If in grouped view, movement doesn't make sense, so skip
+        if self.view_mode == 1:
             return
             
         # Can't move up if at the top
@@ -179,6 +217,16 @@ class TodoApp:
         self.tasks[self.cursor_pos], self.tasks[new_pos] = self.tasks[new_pos], self.tasks[self.cursor_pos]
         self.cursor_pos = new_pos
         self.save_tasks()
+    
+    def get_actual_task_index(self):
+        """Convert cursor position to actual task index, particularly for grouped view"""
+        if self.view_mode == 0 or not self.tasks:
+            return self.cursor_pos if self.cursor_pos < len(self.tasks) else -1
+            
+        # In grouped view, use the mapping array
+        if 0 <= self.cursor_pos < len(self.visible_task_indices):
+            return self.visible_task_indices[self.cursor_pos]
+        return -1
     
     def safe_addstr(self, y, x, text, attr=0):
         """Safely add a string to the screen, avoiding errors if it doesn't fit"""
@@ -199,60 +247,216 @@ class TodoApp:
                 # Catch any curses errors that might still occur
                 pass
     
+    def display_normal_view(self, h, w):
+        """Display tasks in normal order"""
+        self.visible_task_indices = list(range(len(self.tasks)))
+        
+        if not self.tasks:
+            self.safe_addstr(2, 2, "No tasks yet. Press 'i' to add a task.")
+            return
+            
+        for idx, task in enumerate(self.tasks):
+            # Skip if we're beyond the visible area
+            if idx + 2 >= h - 2:
+                break
+                
+            # Determine display attributes
+            if idx == self.cursor_pos:
+                attr = curses.color_pair(5)  # Selected item
+            else:
+                if task.state == TODO:
+                    attr = curses.color_pair(1)  # White for TODO
+                elif task.state == DOING:
+                    attr = curses.color_pair(2)  # Yellow for DOING
+                elif task.state == DONE:
+                    attr = curses.color_pair(3)  # Green for DONE
+                else:  # IMPORTANT
+                    attr = curses.color_pair(4)  # Red for IMPORTANT
+            
+            # Format the bullet based on state
+            if task.state == TODO:
+                bullet = "-"  # Changed to dash for normal tasks
+            elif task.state == DOING:
+                bullet = "~"
+            elif task.state == DONE:
+                bullet = "✓"  # Check mark for done tasks
+            else:  # IMPORTANT
+                bullet = "!"
+            
+            # Display the task
+            text = f" {bullet} {task.text}"
+            self.safe_addstr(idx + 2, 2, text, attr)
+    
+    def display_grouped_view(self, h, w):
+        """Display tasks grouped by state"""
+        self.visible_task_indices = []  # Reset mapping
+        
+        if not self.tasks:
+            self.safe_addstr(2, 2, "No tasks yet. Press 'i' to add a task.")
+            return
+            
+        # Group tasks by state
+        todo_tasks = [(i, t) for i, t in enumerate(self.tasks) if t.state == TODO]
+        done_tasks = [(i, t) for i, t in enumerate(self.tasks) if t.state == DONE]
+        doing_tasks = [(i, t) for i, t in enumerate(self.tasks) if t.state == DOING]
+        important_tasks = [(i, t) for i, t in enumerate(self.tasks) if t.state == IMPORTANT]
+        
+        # Display groups with headers
+        row = 2
+        display_idx = 0
+        
+        # TODO tasks
+        if todo_tasks:
+            self.safe_addstr(row, 2, "TO DO:", curses.A_BOLD)
+            row += 1
+            
+            for original_idx, task in todo_tasks:
+                if row >= h - 2:
+                    break
+                    
+                # Add to mapping
+                self.visible_task_indices.append(original_idx)
+                
+                # Determine if this is the selected task
+                is_selected = display_idx == self.cursor_pos
+                attr = curses.color_pair(5) if is_selected else curses.color_pair(1)
+                
+                text = f" - {task.text}"
+                self.safe_addstr(row, 2, text, attr)
+                row += 1
+                display_idx += 1
+            
+            # Add space after group
+            row += 1
+        
+        # DONE tasks
+        if done_tasks and row < h - 2:
+            self.safe_addstr(row, 2, "DONE:", curses.A_BOLD)
+            row += 1
+            
+            for original_idx, task in done_tasks:
+                if row >= h - 2:
+                    break
+                    
+                # Add to mapping
+                self.visible_task_indices.append(original_idx)
+                
+                # Determine if this is the selected task
+                is_selected = display_idx == self.cursor_pos
+                attr = curses.color_pair(5) if is_selected else curses.color_pair(3)
+                
+                text = f" ✓ {task.text}"
+                self.safe_addstr(row, 2, text, attr)
+                row += 1
+                display_idx += 1
+            
+            # Add space after group
+            row += 1
+        
+        # DOING tasks (yellow)
+        if doing_tasks and row < h - 2:
+            self.safe_addstr(row, 2, "IN PROGRESS:", curses.A_BOLD)
+            row += 1
+            
+            for original_idx, task in doing_tasks:
+                if row >= h - 2:
+                    break
+                    
+                # Add to mapping
+                self.visible_task_indices.append(original_idx)
+                
+                # Determine if this is the selected task
+                is_selected = display_idx == self.cursor_pos
+                attr = curses.color_pair(5) if is_selected else curses.color_pair(2)
+                
+                text = f" ~ {task.text}"
+                self.safe_addstr(row, 2, text, attr)
+                row += 1
+                display_idx += 1
+            
+            # Add space after group
+            row += 1
+        
+        # IMPORTANT tasks (red)
+        if important_tasks and row < h - 2:
+            self.safe_addstr(row, 2, "IMPORTANT:", curses.A_BOLD)
+            row += 1
+            
+            for original_idx, task in important_tasks:
+                if row >= h - 2:
+                    break
+                    
+                # Add to mapping
+                self.visible_task_indices.append(original_idx)
+                
+                # Determine if this is the selected task
+                is_selected = display_idx == self.cursor_pos
+                attr = curses.color_pair(5) if is_selected else curses.color_pair(4)
+                
+                text = f" ! {task.text}"
+                self.safe_addstr(row, 2, text, attr)
+                row += 1
+                display_idx += 1
+                
+        # Make sure cursor doesn't go beyond visible tasks
+        if self.visible_task_indices and self.cursor_pos >= len(self.visible_task_indices):
+            self.cursor_pos = len(self.visible_task_indices) - 1
+    
     def display(self):
         self.stdscr.clear()
         h, w = self.stdscr.getmaxyx()
         
-        # Get current time in UTC
-        current_date = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+        # Display header (simple, no date/time)
         username = "Arjun-G-Ravi"
-        
-        # Display header with date and username
-        header = f" Todo List - {username} - {current_date} "
+        header = f" Todo List - {username} "
         if len(header) < w:
             self.safe_addstr(0, (w - len(header)) // 2, header, curses.A_BOLD)
         
-        # Display keys at bottom - avoiding arrow symbols for compatibility
-        help_text = "i: new task | space: cycle state | d: delete | u: undo | Shift+j/k: move | q: quit"
+        # Display help at bottom
+        view_text = "NORMAL VIEW" if self.view_mode == 0 else "GROUPED VIEW"
+        help_text = f"i:new | d:delete | space:toggle | q:quit | o:cycle-all | v:{view_text} | u:undo | Shift+arrows/jk:move"
         self.safe_addstr(h-1, 2, help_text)
         
-        # Display tasks
-        if not self.tasks:
-            self.safe_addstr(2, 2, "No tasks yet. Press 'i' to add a task.")
+        # Display tasks based on view mode
+        if self.view_mode == 0:
+            self.display_normal_view(h, w)
         else:
-            for idx, task in enumerate(self.tasks):
-                # Skip if we're beyond the visible area
-                if idx + 2 >= h - 2:
-                    break
-                    
-                # Determine display attributes
-                if idx == self.cursor_pos:
-                    attr = curses.color_pair(5)  # Selected item
-                else:
-                    if task.state == TODO:
-                        attr = curses.color_pair(1)  # White for TODO
-                    elif task.state == DOING:
-                        attr = curses.color_pair(2)  # Yellow for DOING
-                    elif task.state == DONE:
-                        attr = curses.color_pair(3)  # Green for DONE
-                    else:  # IMPORTANT
-                        attr = curses.color_pair(4)  # Red for IMPORTANT
-                
-                # Format the bullet based on state
-                if task.state == TODO:
-                    bullet = "*"
-                elif task.state == DOING:
-                    bullet = "~"
-                elif task.state == DONE:
-                    bullet = "x"
-                else:  # IMPORTANT
-                    bullet = "!"
-                
-                # Display the task
-                text = f" {bullet} {task.text}"
-                self.safe_addstr(idx + 2, 2, text, attr)
+            self.display_grouped_view(h, w)
         
         self.stdscr.refresh()
+    
+    def handle_special_keys(self, key):
+        """Handle complex key combinations and sequences"""
+        # Check for ESC sequence (ALT key)
+        if self.last_key == 27 and key != -1:  # ESC followed by another key
+            if key == ord('j'):  # Alt+j - move down
+                self.move_task(1)
+                return True
+            elif key == ord('k'):  # Alt+k - move up
+                self.move_task(-1)
+                return True
+            elif key == curses.KEY_DOWN:  # Alt+down - move down
+                self.move_task(1)
+                return True
+            elif key == curses.KEY_UP:  # Alt+up - move up
+                self.move_task(-1)
+                return True
+            elif key == 32:  # Alt+space - toggle like spacebar
+                self.toggle_task_state_simple()
+                return True
+            
+        self.last_key = key
+        
+        # Common key codes for Shift+Down Arrow (e.g., in xterm, gnome-terminal)
+        if key == 516 or key == 336: 
+            self.move_task(1)
+            return True
+        # Common key codes for Shift+Up Arrow (e.g., in xterm, gnome-terminal)
+        elif key == 558 or key == 337: 
+            self.move_task(-1)
+            return True
+            
+        return False
     
     def run(self):
         try:
@@ -260,40 +464,48 @@ class TodoApp:
                 try:
                     self.display()
                     
-                    # Get key press
                     key = self.stdscr.getch()
                     
-                    # Handle timeout (-1) or other invalid keys
                     if key == -1:
+                        # Reset last key if enough time has passed
+                        self.last_key = -1
                         continue
                     
-                    # Handle navigation
+                    if self.handle_special_keys(key):
+                        continue
+                    
                     if key == curses.KEY_UP or key == ord('k'):
                         self.cursor_pos = max(0, self.cursor_pos - 1)
                     elif key == curses.KEY_DOWN or key == ord('j'):
-                        self.cursor_pos = min(len(self.tasks) - 1 if self.tasks else 0, self.cursor_pos + 1)
+                        visible_tasks = len(self.visible_task_indices) if self.view_mode == 1 else len(self.tasks)
+                        self.cursor_pos = min(visible_tasks - 1 if visible_tasks else 0, self.cursor_pos + 1)
                     
-                    # Handle Shift+key combinations for task movement
-                    # Standard curses doesn't detect Shift+j/k directly, but we can use capital J/K
                     elif key == ord('J'):  # Shift+j - move down
                         self.move_task(1)
                     elif key == ord('K'):  # Shift+k - move up
                         self.move_task(-1)
                     
-                    # Handle commands
-                    elif key == ord('i'):  # Insert new task
+                    elif key == ord('i'):
                         self.add_task()
-                    elif key == ord(' '):  # Toggle task state
-                        self.toggle_task_state()
-                    elif key == ord('d'):  # Delete task
+                    elif key == ord(' '):
+                        self.toggle_task_state_simple()
+                    elif key == ord('o'):
+                        self.cycle_all_states()
+                    elif key == ord('v'):
+                        self.toggle_view_mode()
+                    elif key == ord('d'):
                         self.delete_task()
-                    elif key == ord('u'):  # Undo
+                    elif key == ord('u'):
                         self.undo()
-                    elif key == ord('q'):  # Quit
+                    elif key == ord('q'):
                         break
+                    
+                    # Check for ESC key (27) - potential start of Alt sequence
+                    elif key == 27:
+                        pass
                 
                 except curses.error:
-                    # Handle any curses errors by resizing the display
+                    # Handle any curses errors by refreshing
                     self.stdscr.refresh()
         
         except KeyboardInterrupt:
