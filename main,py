@@ -1,5 +1,7 @@
 import curses
 import os
+import signal
+import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -59,8 +61,16 @@ class TodoApp:
         curses.init_pair(4, curses.COLOR_RED, -1)     # IMPORTANT - red
         curses.init_pair(5, curses.COLOR_WHITE, curses.COLOR_BLUE) # Selected item
         
-        # Set cursor to invisible (optional)
+        # Set cursor to invisible
         curses.curs_set(0)
+        
+        # Setup for key input
+        self.stdscr.keypad(True)
+        self.stdscr.timeout(100)  # Makes getch non-blocking with a timeout
+        
+        # For shift+j/k detection
+        self.last_key_time = 0
+        self.shift_pressed = False
     
     def ensure_todo_dir(self):
         # Create the directory if it doesn't exist
@@ -170,24 +180,51 @@ class TodoApp:
         self.cursor_pos = new_pos
         self.save_tasks()
     
+    def safe_addstr(self, y, x, text, attr=0):
+        """Safely add a string to the screen, avoiding errors if it doesn't fit"""
+        h, w = self.stdscr.getmaxyx()
+        if y < h and x < w:
+            # Truncate the text if it would go beyond the screen width
+            max_len = w - x - 1
+            if max_len <= 0:
+                return
+            
+            # Truncate text if needed
+            if len(text) > max_len:
+                text = text[:max_len]
+                
+            try:
+                self.stdscr.addstr(y, x, text, attr)
+            except curses.error:
+                # Catch any curses errors that might still occur
+                pass
+    
     def display(self):
         self.stdscr.clear()
         h, w = self.stdscr.getmaxyx()
         
-        # Display header with date and username
-        current_date = "2025-06-07 16:40:23"  # From your input
-        username = "Arjun-G-Ravi"  # From your input
-        header = f" Todo List - {username} - {current_date} "
-        self.stdscr.addstr(0, (w - len(header)) // 2, header, curses.A_BOLD)
+        # Get current time in UTC
+        current_date = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+        username = "Arjun-G-Ravi"
         
-        # Display keys at bottom
-        self.stdscr.addstr(h-1, 2, "i: new task | space: cycle state | d: delete | u: undo | Shift+↑/↓: move | q: quit")
+        # Display header with date and username
+        header = f" Todo List - {username} - {current_date} "
+        if len(header) < w:
+            self.safe_addstr(0, (w - len(header)) // 2, header, curses.A_BOLD)
+        
+        # Display keys at bottom - avoiding arrow symbols for compatibility
+        help_text = "i: new task | space: cycle state | d: delete | u: undo | Shift+j/k: move | q: quit"
+        self.safe_addstr(h-1, 2, help_text)
         
         # Display tasks
         if not self.tasks:
-            self.stdscr.addstr(2, 2, "No tasks yet. Press 'i' to add a task.")
+            self.safe_addstr(2, 2, "No tasks yet. Press 'i' to add a task.")
         else:
             for idx, task in enumerate(self.tasks):
+                # Skip if we're beyond the visible area
+                if idx + 2 >= h - 2:
+                    break
+                    
                 # Determine display attributes
                 if idx == self.cursor_pos:
                     attr = curses.color_pair(5)  # Selected item
@@ -203,58 +240,83 @@ class TodoApp:
                 
                 # Format the bullet based on state
                 if task.state == TODO:
-                    bullet = "•"
+                    bullet = "*"
                 elif task.state == DOING:
                     bullet = "~"
                 elif task.state == DONE:
-                    bullet = "✓"
+                    bullet = "x"
                 else:  # IMPORTANT
                     bullet = "!"
                 
-                # Display the task if it fits in the window
-                if idx + 2 < h - 2:  # Account for header and footer
-                    text = f" {bullet} {task.text}"
-                    # Truncate text if too long for the window
-                    if len(text) > w - 4:
-                        text = text[:w-7] + "..."
-                    self.stdscr.addstr(idx + 2, 2, text, attr)
+                # Display the task
+                text = f" {bullet} {task.text}"
+                self.safe_addstr(idx + 2, 2, text, attr)
         
         self.stdscr.refresh()
     
     def run(self):
-        while True:
-            self.display()
-            
-            # Get key press
-            key = self.stdscr.getch()
-            
-            # Handle navigation
-            if key == curses.KEY_UP or key == ord('k'):
-                self.cursor_pos = max(0, self.cursor_pos - 1)
-            elif key == curses.KEY_DOWN or key == ord('j'):
-                self.cursor_pos = min(len(self.tasks) - 1 if self.tasks else 0, self.cursor_pos + 1)
-            
-            # Handle shift+arrow keys for moving tasks (KEY_SR is Shift+Up, KEY_SF is Shift+Down)
-            elif key == curses.KEY_SR:  # Shift+Up
-                self.move_task(-1)
-            elif key == curses.KEY_SF:  # Shift+Down
-                self.move_task(1)
-            
-            # Handle commands
-            elif key == ord('i'):  # Insert new task
-                self.add_task()
-            elif key == ord(' '):  # Toggle task state
-                self.toggle_task_state()
-            elif key == ord('d'):  # Delete task
-                self.delete_task()
-            elif key == ord('u'):  # Undo
-                self.undo()
-            elif key == ord('q'):  # Quit
-                break
+        try:
+            while True:
+                try:
+                    self.display()
+                    
+                    # Get key press
+                    key = self.stdscr.getch()
+                    
+                    # Handle timeout (-1) or other invalid keys
+                    if key == -1:
+                        continue
+                    
+                    # Handle navigation
+                    if key == curses.KEY_UP or key == ord('k'):
+                        self.cursor_pos = max(0, self.cursor_pos - 1)
+                    elif key == curses.KEY_DOWN or key == ord('j'):
+                        self.cursor_pos = min(len(self.tasks) - 1 if self.tasks else 0, self.cursor_pos + 1)
+                    
+                    # Handle Shift+key combinations for task movement
+                    # Standard curses doesn't detect Shift+j/k directly, but we can use capital J/K
+                    elif key == ord('J'):  # Shift+j - move down
+                        self.move_task(1)
+                    elif key == ord('K'):  # Shift+k - move up
+                        self.move_task(-1)
+                    
+                    # Handle commands
+                    elif key == ord('i'):  # Insert new task
+                        self.add_task()
+                    elif key == ord(' '):  # Toggle task state
+                        self.toggle_task_state()
+                    elif key == ord('d'):  # Delete task
+                        self.delete_task()
+                    elif key == ord('u'):  # Undo
+                        self.undo()
+                    elif key == ord('q'):  # Quit
+                        break
+                
+                except curses.error:
+                    # Handle any curses errors by resizing the display
+                    self.stdscr.refresh()
+        
+        except KeyboardInterrupt:
+            # Handle Ctrl+C gracefully
+            pass
+        
+        finally:
+            # Make sure we save tasks on exit
+            self.save_tasks()
 
 def main(stdscr):
+    # Set up signal handler for SIGINT (Ctrl+C)
+    def signal_handler(sig, frame):
+        sys.exit(0)
+    
+    signal.signal(signal.SIGINT, signal_handler)
+    
     app = TodoApp(stdscr)
     app.run()
 
 if __name__ == "__main__":
-    curses.wrapper(main)
+    try:
+        curses.wrapper(main)
+    except KeyboardInterrupt:
+        # Exit cleanly on Ctrl+C
+        pass
