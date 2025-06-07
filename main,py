@@ -1,0 +1,208 @@
+import curses
+import os
+from datetime import datetime
+
+# Task states
+TODO = 0
+DOING = 1
+DONE = 2
+
+TODO_FILE = "todo.md"
+
+class Task:
+    def __init__(self, text, state=TODO):
+        self.text = text
+        self.state = state
+    
+    @staticmethod
+    def from_markdown(line):
+        if line.startswith("- [ ] "):
+            return Task(line[6:].strip(), TODO)
+        elif line.startswith("- [~] "):
+            return Task(line[6:].strip(), DOING)
+        elif line.startswith("- [x] "):
+            return Task(line[6:].strip(), DONE)
+        return None
+
+    def to_markdown(self):
+        if self.state == TODO:
+            return f"- [ ] {self.text}"
+        elif self.state == DOING:
+            return f"- [~] {self.text}"
+        else:  # DONE
+            return f"- [x] {self.text}"
+
+class TodoApp:
+    def __init__(self, stdscr):
+        self.stdscr = stdscr
+        self.tasks = []
+        self.cursor_pos = 0
+        self.load_tasks()
+        self.history = []  # For undo functionality
+        
+        # Initialize colors
+        curses.start_color()
+        curses.use_default_colors()
+        curses.init_pair(1, curses.COLOR_GREEN, -1)  # TODO
+        curses.init_pair(2, curses.COLOR_YELLOW, -1) # DOING
+        curses.init_pair(3, curses.COLOR_RED, -1)    # DONE
+        curses.init_pair(4, curses.COLOR_WHITE, curses.COLOR_BLUE) # Selected item
+        
+        # Set cursor to invisible (optional)
+        curses.curs_set(0)
+        
+    def load_tasks(self):
+        self.tasks = []
+        if not os.path.exists(TODO_FILE):
+            return
+        
+        with open(TODO_FILE, "r", encoding="utf-8") as f:
+            for line in f:
+                task = Task.from_markdown(line.strip())
+                if task:
+                    self.tasks.append(task)
+        
+        # Reset cursor position if needed
+        if self.tasks and self.cursor_pos >= len(self.tasks):
+            self.cursor_pos = len(self.tasks) - 1
+    
+    def save_tasks(self):
+        with open(TODO_FILE, "w", encoding="utf-8") as f:
+            for task in self.tasks:
+                f.write(f"{task.to_markdown()}\n")
+    
+    def add_to_history(self):
+        # Save current state to history
+        current_state = []
+        for task in self.tasks:
+            current_state.append(Task(task.text, task.state))
+        self.history.append((list(current_state), self.cursor_pos))
+        
+        # Limit history size to prevent memory issues
+        if len(self.history) > 50:
+            self.history.pop(0)
+    
+    def undo(self):
+        if not self.history:
+            return
+        
+        # Restore previous state
+        previous_state, previous_cursor = self.history.pop()
+        self.tasks = previous_state
+        self.cursor_pos = previous_cursor
+    
+    def add_task(self):
+        # Create a sub-window for input
+        h, w = self.stdscr.getmaxyx()
+        input_win = curses.newwin(1, w-10, h-2, 5)
+        curses.echo()
+        curses.curs_set(1)  # Show cursor
+        
+        # Display prompt
+        self.stdscr.addstr(h-3, 2, "Enter new task: ")
+        self.stdscr.refresh()
+        
+        # Get input
+        curses.curs_set(1)
+        input_win.clear()
+        task_text = input_win.getstr().decode('utf-8')
+        curses.noecho()
+        curses.curs_set(0)  # Hide cursor again
+        
+        if task_text.strip():
+            self.add_to_history()
+            self.tasks.append(Task(task_text.strip()))
+            self.cursor_pos = len(self.tasks) - 1
+            self.save_tasks()
+    
+    def toggle_task_state(self):
+        if not self.tasks:
+            return
+            
+        self.add_to_history()
+        # Cycle through states: TODO -> DOING -> DONE -> TODO
+        self.tasks[self.cursor_pos].state = (self.tasks[self.cursor_pos].state + 1) % 3
+        self.save_tasks()
+    
+    def mark_task_done(self):
+        if not self.tasks:
+            return
+            
+        self.add_to_history()
+        self.tasks[self.cursor_pos].state = DONE
+        self.save_tasks()
+    
+    def display(self):
+        self.stdscr.clear()
+        h, w = self.stdscr.getmaxyx()
+        
+        # Display header
+        header = " Todo List "
+        self.stdscr.addstr(0, (w - len(header)) // 2, header, curses.A_BOLD)
+        self.stdscr.addstr(h-1, 2, "i: new task | space: cycle state | d: mark done | u: undo | q: quit")
+        
+        # Display tasks
+        if not self.tasks:
+            self.stdscr.addstr(2, 2, "No tasks yet. Press 'i' to add a task.")
+        else:
+            for idx, task in enumerate(self.tasks):
+                # Determine display attributes
+                if idx == self.cursor_pos:
+                    attr = curses.color_pair(4)  # Selected item
+                else:
+                    if task.state == TODO:
+                        attr = curses.color_pair(1)  # Green for TODO
+                    elif task.state == DOING:
+                        attr = curses.color_pair(2)  # Yellow for DOING
+                    else:  # DONE
+                        attr = curses.color_pair(3)  # Red for DONE
+                
+                # Format the bullet based on state
+                if task.state == TODO:
+                    bullet = "•"
+                elif task.state == DOING:
+                    bullet = "~"
+                else:  # DONE
+                    bullet = "✓"
+                
+                # Display the task if it fits in the window
+                if idx + 2 < h - 2:  # Account for header and footer
+                    text = f" {bullet} {task.text}"
+                    # Truncate text if too long for the window
+                    if len(text) > w - 4:
+                        text = text[:w-7] + "..."
+                    self.stdscr.addstr(idx + 2, 2, text, attr)
+        
+        self.stdscr.refresh()
+    
+    def run(self):
+        while True:
+            self.display()
+            
+            # Get key press
+            key = self.stdscr.getch()
+            
+            # Handle navigation
+            if key == curses.KEY_UP or key == ord('k'):
+                self.cursor_pos = max(0, self.cursor_pos - 1)
+            elif key == curses.KEY_DOWN or key == ord('j'):
+                self.cursor_pos = min(len(self.tasks) - 1 if self.tasks else 0, self.cursor_pos + 1)
+            
+            # Handle commands
+            elif key == ord('i'):  # Insert new task
+                self.add_task()
+            elif key == ord(' '):  # Toggle task state
+                self.toggle_task_state()
+            elif key == ord('d'):  # Mark task as done
+                self.mark_task_done()
+            elif key == ord('u'):  # Undo
+                self.undo()
+            elif key == ord('q'):  # Quit
+                break
+
+def main(stdscr):
+    app = TodoApp(stdscr)
+    app.run()
+
+if __name__ == "__main__":
+    curses.wrapper(main)
