@@ -138,6 +138,87 @@ class TodoApp:
             self.tasks.append(Task(task_text.strip()))
             self.cursor_pos = len(self.tasks) - 1
             self.save_tasks()
+            
+    def edit_task(self):
+        """Edit the selected task"""
+        if not self.tasks:
+            return
+            
+        # If in grouped view, map cursor position to actual task index
+        task_index = self.get_actual_task_index()
+        if task_index == -1:
+            return
+        
+        # Get current task text
+        current_text = self.tasks[task_index].text
+        
+        # Create a sub-window for input
+        h, w = self.stdscr.getmaxyx()
+        
+        # Clear the bottom area first
+        for y in range(h-3, h):
+            self.stdscr.move(y, 0)
+            self.stdscr.clrtoeol()
+        
+        # Display prompt
+        self.stdscr.addstr(h-3, 2, "Edit task: ")
+        self.stdscr.refresh()
+        
+        # Create a dedicated window for text input
+        edit_win = curses.newwin(1, w-10, h-2, 5)
+        edit_win.keypad(True)  # Enable special keys
+        
+        # Initialize editing with the current text
+        editing_text = current_text
+        cursor_pos = len(editing_text)
+        
+        # Enable cursor visibility
+        curses.curs_set(1)
+        
+        # Process key inputs for the edit window
+        while True:
+            # Display the current text
+            edit_win.clear()
+            edit_win.addstr(0, 0, editing_text)
+            edit_win.move(0, cursor_pos)  # Position cursor
+            edit_win.refresh()
+            
+            # Get key input
+            ch = edit_win.getch()
+            
+            # Handle key presses
+            if ch == curses.KEY_ENTER or ch == 10 or ch == 13:  # Enter key
+                break
+            elif ch == 27:  # Escape key - cancel edit
+                editing_text = current_text  # Revert to original
+                break
+            elif ch == curses.KEY_BACKSPACE or ch == 127 or ch == 8:  # Backspace
+                if cursor_pos > 0:
+                    editing_text = editing_text[:cursor_pos-1] + editing_text[cursor_pos:]
+                    cursor_pos -= 1
+            elif ch == curses.KEY_DC:  # Delete key
+                if cursor_pos < len(editing_text):
+                    editing_text = editing_text[:cursor_pos] + editing_text[cursor_pos+1:]
+            elif ch == curses.KEY_LEFT:  # Left arrow
+                cursor_pos = max(0, cursor_pos - 1)
+            elif ch == curses.KEY_RIGHT:  # Right arrow
+                cursor_pos = min(len(editing_text), cursor_pos + 1)
+            elif ch == curses.KEY_HOME:  # Home key
+                cursor_pos = 0
+            elif ch == curses.KEY_END:  # End key
+                cursor_pos = len(editing_text)
+            elif 32 <= ch <= 126:  # Printable characters
+                editing_text = editing_text[:cursor_pos] + chr(ch) + editing_text[cursor_pos:]
+                cursor_pos += 1
+        
+        # Restore cursor visibility setting
+        curses.curs_set(0)
+        
+        # Save the edited text if changed
+        if editing_text.strip() and editing_text != current_text:
+            self.add_to_history()
+            self.tasks[task_index].text = editing_text.strip()
+            self.save_tasks()
     
     def toggle_task_state_simple(self):
         """Toggle between white (TODO) and green (DONE) only - for spacebar and alt"""
@@ -412,9 +493,9 @@ class TodoApp:
         if len(header) < w:
             self.safe_addstr(0, (w - len(header)) // 2, header, curses.A_BOLD)
         
-        # Display help at bottom
+        # Display help at bottom - removed 'a:new'
         view_text = "NORMAL VIEW" if self.view_mode == 0 else "GROUPED VIEW"
-        help_text = f"i:new | d:delete | space:toggle | q:quit | o:cycle-all | v:{view_text} | u:undo | Shift+arrows/jk:move"
+        help_text = f"e:edit | d:delete | space/h:toggle | q:quit | c:cycle-all | v:{view_text} | u:undo | Shift+arrows/jk:move"
         self.safe_addstr(h-1, 2, help_text)
         
         # Display tasks based on view mode
@@ -485,11 +566,13 @@ class TodoApp:
                     elif key == ord('K'):  # Shift+k - move up
                         self.move_task(-1)
                     
-                    elif key == ord('i'):
+                    elif key == ord('i') or key == ord('o'):  # Add task with 'i' or 'o'
                         self.add_task()
-                    elif key == ord(' '):
+                    elif key == ord('e'):  # Edit task with 'e'
+                        self.edit_task()
+                    elif key == ord(' ') or key == ord('h'):  # Toggle with space or 'h'
                         self.toggle_task_state_simple()
-                    elif key == ord('o'):
+                    elif key == ord('c'):  # 'c' to cycle states (was 'o')
                         self.cycle_all_states()
                     elif key == ord('v'):
                         self.toggle_view_mode()
