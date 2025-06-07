@@ -70,6 +70,11 @@ class TodoApp:
         self.stdscr.timeout(100)  # Makes getch non-blocking with a timeout
         
         self.last_key = -1
+        
+        # Add cached state for optimization
+        self.grouped_tasks = None
+        self.needs_regrouping = True
+        self.last_display_size = (0, 0)
     
     def ensure_todo_dir(self):
         # Create the directory if it doesn't exist
@@ -95,6 +100,8 @@ class TodoApp:
         with open(TODO_FILE, "w", encoding="utf-8") as f:
             for task in self.tasks:
                 f.write(f"{task.to_markdown()}\n")
+        # Mark that we need to regroup tasks on next display
+        self.needs_regrouping = True
     
     def add_to_history(self):
         # Save current state to history
@@ -138,7 +145,8 @@ class TodoApp:
             self.tasks.append(Task(task_text.strip()))
             self.cursor_pos = len(self.tasks) - 1
             self.save_tasks()
-            
+            self.needs_regrouping = True
+    
     def edit_task(self):
         """Edit the selected task"""
         if not self.tasks:
@@ -219,6 +227,7 @@ class TodoApp:
             self.add_to_history()
             self.tasks[task_index].text = editing_text.strip()
             self.save_tasks()
+            self.needs_regrouping = True
     
     def toggle_task_state_simple(self):
         """Toggle between white (TODO) and green (DONE) only - for spacebar and alt"""
@@ -237,6 +246,7 @@ class TodoApp:
         else:
             self.tasks[task_index].state = TODO
         self.save_tasks()
+        self.needs_regrouping = True
     
     def cycle_all_states(self):
         """Cycle through all 4 states - for 'o' key"""
@@ -252,12 +262,14 @@ class TodoApp:
         # Cycle through all states: TODO -> DOING -> DONE -> IMPORTANT -> TODO
         self.tasks[task_index].state = (self.tasks[task_index].state + 1) % 4
         self.save_tasks()
+        self.needs_regrouping = True
     
     def toggle_view_mode(self):
         """Toggle between normal and grouped view modes"""
         self.view_mode = (self.view_mode + 1) % 2
         # Reset cursor position when changing views
         self.cursor_pos = min(self.cursor_pos, len(self.tasks) - 1 if self.tasks else 0)
+        self.needs_regrouping = True
     
     def delete_task(self):
         if not self.tasks:
@@ -275,6 +287,7 @@ class TodoApp:
         if self.cursor_pos >= len(self.visible_task_indices) and self.visible_task_indices:
             self.cursor_pos = len(self.visible_task_indices) - 1
         self.save_tasks()
+        self.needs_regrouping = True
     
     def move_task(self, direction):
         if not self.tasks or len(self.tasks) < 2:
@@ -298,6 +311,7 @@ class TodoApp:
         self.tasks[self.cursor_pos], self.tasks[new_pos] = self.tasks[new_pos], self.tasks[self.cursor_pos]
         self.cursor_pos = new_pos
         self.save_tasks()
+        self.needs_regrouping = True
     
     def get_actual_task_index(self):
         """Convert cursor position to actual task index, particularly for grouped view"""
@@ -369,29 +383,42 @@ class TodoApp:
             self.safe_addstr(idx + 2, 2, text, attr)
     
     def display_grouped_view(self, h, w):
-        """Display tasks grouped by state"""
+        """Display tasks grouped by state with caching for performance"""
         self.visible_task_indices = []  # Reset mapping
         
         if not self.tasks:
             self.safe_addstr(2, 2, "No tasks yet. Press 'i' to add a task.")
             return
             
-        # Group tasks by state
-        todo_tasks = [(i, t) for i, t in enumerate(self.tasks) if t.state == TODO]
-        done_tasks = [(i, t) for i, t in enumerate(self.tasks) if t.state == DONE]
-        doing_tasks = [(i, t) for i, t in enumerate(self.tasks) if t.state == DOING]
-        important_tasks = [(i, t) for i, t in enumerate(self.tasks) if t.state == IMPORTANT]
+        # Only regroup tasks if needed (optimization)
+        current_size = (h, w)
+        if self.needs_regrouping or self.grouped_tasks is None or self.last_display_size != current_size:
+            # Group tasks by state
+            todo_tasks = [(i, t) for i, t in enumerate(self.tasks) if t.state == TODO]
+            done_tasks = [(i, t) for i, t in enumerate(self.tasks) if t.state == DONE]
+            doing_tasks = [(i, t) for i, t in enumerate(self.tasks) if t.state == DOING]
+            important_tasks = [(i, t) for i, t in enumerate(self.tasks) if t.state == IMPORTANT]
+            
+            self.grouped_tasks = {
+                'todo': todo_tasks,
+                'done': done_tasks,
+                'doing': doing_tasks,
+                'important': important_tasks
+            }
+            
+            self.needs_regrouping = False
+            self.last_display_size = current_size
         
         # Display groups with headers
         row = 2
         display_idx = 0
         
         # TODO tasks
-        if todo_tasks:
+        if self.grouped_tasks['todo']:
             self.safe_addstr(row, 2, "TO DO:", curses.A_BOLD)
             row += 1
             
-            for original_idx, task in todo_tasks:
+            for original_idx, task in self.grouped_tasks['todo']:
                 if row >= h - 2:
                     break
                     
@@ -411,11 +438,11 @@ class TodoApp:
             row += 1
         
         # DONE tasks
-        if done_tasks and row < h - 2:
+        if self.grouped_tasks['done'] and row < h - 2:
             self.safe_addstr(row, 2, "DONE:", curses.A_BOLD)
             row += 1
             
-            for original_idx, task in done_tasks:
+            for original_idx, task in self.grouped_tasks['done']:
                 if row >= h - 2:
                     break
                     
@@ -435,11 +462,11 @@ class TodoApp:
             row += 1
         
         # DOING tasks (yellow)
-        if doing_tasks and row < h - 2:
+        if self.grouped_tasks['doing'] and row < h - 2:
             self.safe_addstr(row, 2, "IN PROGRESS:", curses.A_BOLD)
             row += 1
             
-            for original_idx, task in doing_tasks:
+            for original_idx, task in self.grouped_tasks['doing']:
                 if row >= h - 2:
                     break
                     
@@ -459,11 +486,11 @@ class TodoApp:
             row += 1
         
         # IMPORTANT tasks (red)
-        if important_tasks and row < h - 2:
+        if self.grouped_tasks['important'] and row < h - 2:
             self.safe_addstr(row, 2, "IMPORTANT:", curses.A_BOLD)
             row += 1
             
-            for original_idx, task in important_tasks:
+            for original_idx, task in self.grouped_tasks['important']:
                 if row >= h - 2:
                     break
                     
@@ -495,7 +522,7 @@ class TodoApp:
         
         # Display help at bottom - removed 'a:new'
         view_text = "NORMAL VIEW" if self.view_mode == 0 else "GROUPED VIEW"
-        help_text = f"e:edit | d:delete | space/h:toggle | q:quit | c:cycle-all | v:{view_text} | u:undo | Shift+arrows/jk:move"
+        help_text = f"i: add | d:delete | space/h:toggle | q:quit | e:edit | c:cycle-all | v:{view_text} | u:undo | Shift+arrows/jk:move"
         self.safe_addstr(h-1, 2, help_text)
         
         # Display tasks based on view mode
@@ -507,33 +534,30 @@ class TodoApp:
         self.stdscr.refresh()
     
     def handle_special_keys(self, key):
-        """Handle complex key combinations and sequences"""
+        """Handle complex key combinations and sequences using a mapping for efficiency"""
         # Check for ESC sequence (ALT key)
         if self.last_key == 27 and key != -1:  # ESC followed by another key
-            if key == ord('j'):  # Alt+j - move down
-                self.move_task(1)
-                return True
-            elif key == ord('k'):  # Alt+k - move up
-                self.move_task(-1)
-                return True
-            elif key == curses.KEY_DOWN:  # Alt+down - move down
-                self.move_task(1)
-                return True
-            elif key == curses.KEY_UP:  # Alt+up - move up
-                self.move_task(-1)
-                return True
-            elif key == 32:  # Alt+space - toggle like spacebar
-                self.toggle_task_state_simple()
+            # Use a dictionary for faster lookup
+            alt_key_actions = {
+                ord('j'): lambda: self.move_task(1),
+                ord('k'): lambda: self.move_task(-1),
+                curses.KEY_DOWN: lambda: self.move_task(1),
+                curses.KEY_UP: lambda: self.move_task(-1),
+                32: self.toggle_task_state_simple  # Alt+space
+            }
+            
+            action = alt_key_actions.get(key)
+            if action:
+                action()
                 return True
             
         self.last_key = key
         
-        # Common key codes for Shift+Down Arrow (e.g., in xterm, gnome-terminal)
-        if key == 516 or key == 336: 
+        # Use a set for faster membership testing
+        if key in {516, 336}:  # Shift+Down Arrow
             self.move_task(1)
             return True
-        # Common key codes for Shift+Up Arrow (e.g., in xterm, gnome-terminal)
-        elif key == 558 or key == 337: 
+        elif key in {558, 337}:  # Shift+Up Arrow
             self.move_task(-1)
             return True
             
@@ -541,7 +565,30 @@ class TodoApp:
     
     def run(self):
         try:
-            while True:
+            # Use a lookup table for key commands to speed up processing
+            key_handlers = {
+                curses.KEY_UP: lambda: setattr(self, 'cursor_pos', max(0, self.cursor_pos - 1)),
+                ord('k'): lambda: setattr(self, 'cursor_pos', max(0, self.cursor_pos - 1)),
+                curses.KEY_DOWN: lambda: self._handle_down_key(),
+                ord('j'): lambda: self._handle_down_key(),
+                ord('J'): lambda: self.move_task(1),
+                ord('K'): lambda: self.move_task(-1),
+                ord('i'): self.add_task,
+                ord('o'): self.add_task,
+                ord('e'): self.edit_task,
+                ord(' '): self.toggle_task_state_simple,
+                ord('h'): self.toggle_task_state_simple,
+                ord('c'): self.cycle_all_states,
+                ord('v'): self.toggle_view_mode,
+                ord('d'): self.delete_task,
+                ord('u'): self.undo,
+                ord('q'): lambda: setattr(self, '_should_quit', True),
+                27: lambda: None  # ESC key - handled separately
+            }
+            
+            self._should_quit = False
+            
+            while not self._should_quit:
                 try:
                     self.display()
                     
@@ -555,37 +602,10 @@ class TodoApp:
                     if self.handle_special_keys(key):
                         continue
                     
-                    if key == curses.KEY_UP or key == ord('k'):
-                        self.cursor_pos = max(0, self.cursor_pos - 1)
-                    elif key == curses.KEY_DOWN or key == ord('j'):
-                        visible_tasks = len(self.visible_task_indices) if self.view_mode == 1 else len(self.tasks)
-                        self.cursor_pos = min(visible_tasks - 1 if visible_tasks else 0, self.cursor_pos + 1)
-                    
-                    elif key == ord('J'):  # Shift+j - move down
-                        self.move_task(1)
-                    elif key == ord('K'):  # Shift+k - move up
-                        self.move_task(-1)
-                    
-                    elif key == ord('i') or key == ord('o'):  # Add task with 'i' or 'o'
-                        self.add_task()
-                    elif key == ord('e'):  # Edit task with 'e'
-                        self.edit_task()
-                    elif key == ord(' ') or key == ord('h'):  # Toggle with space or 'h'
-                        self.toggle_task_state_simple()
-                    elif key == ord('c'):  # 'c' to cycle states (was 'o')
-                        self.cycle_all_states()
-                    elif key == ord('v'):
-                        self.toggle_view_mode()
-                    elif key == ord('d'):
-                        self.delete_task()
-                    elif key == ord('u'):
-                        self.undo()
-                    elif key == ord('q'):
-                        break
-                    
-                    # Check for ESC key (27) - potential start of Alt sequence
-                    elif key == 27:
-                        pass
+                    # Get and execute the handler for this key if it exists
+                    handler = key_handlers.get(key)
+                    if handler:
+                        handler()
                 
                 except curses.error:
                     # Handle any curses errors by refreshing
@@ -598,6 +618,11 @@ class TodoApp:
         finally:
             # Make sure we save tasks on exit
             self.save_tasks()
+    
+    def _handle_down_key(self):
+        """Helper method for down key logic (extracted to avoid duplication)"""
+        visible_tasks = len(self.visible_task_indices) if self.view_mode == 1 else len(self.tasks)
+        self.cursor_pos = min(visible_tasks - 1 if visible_tasks else 0, self.cursor_pos + 1)
 
 def main(stdscr):
     # Set up signal handler for SIGINT (Ctrl+C)
