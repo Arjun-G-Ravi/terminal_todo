@@ -1,13 +1,18 @@
 import curses
 import os
 from datetime import datetime
+from pathlib import Path
 
 # Task states
 TODO = 0
 DOING = 1
 DONE = 2
+IMPORTANT = 3  # Added for the 4th color state
 
-TODO_FILE = "todo.md"
+# Get the user's home directory for Linux
+HOME_DIR = str(Path.home())
+TODO_DIR = os.path.join(HOME_DIR, ".local", "share", "todo")
+TODO_FILE = os.path.join(TODO_DIR, "tasks.md")
 
 class Task:
     def __init__(self, text, state=TODO):
@@ -22,6 +27,8 @@ class Task:
             return Task(line[6:].strip(), DOING)
         elif line.startswith("- [x] "):
             return Task(line[6:].strip(), DONE)
+        elif line.startswith("- [!] "):
+            return Task(line[6:].strip(), IMPORTANT)
         return None
 
     def to_markdown(self):
@@ -29,27 +36,36 @@ class Task:
             return f"- [ ] {self.text}"
         elif self.state == DOING:
             return f"- [~] {self.text}"
-        else:  # DONE
+        elif self.state == DONE:
             return f"- [x] {self.text}"
+        else:  # IMPORTANT
+            return f"- [!] {self.text}"
 
 class TodoApp:
     def __init__(self, stdscr):
         self.stdscr = stdscr
         self.tasks = []
         self.cursor_pos = 0
+        self.ensure_todo_dir()
         self.load_tasks()
         self.history = []  # For undo functionality
         
         # Initialize colors
         curses.start_color()
         curses.use_default_colors()
-        curses.init_pair(1, curses.COLOR_GREEN, -1)  # TODO
-        curses.init_pair(2, curses.COLOR_YELLOW, -1) # DOING
-        curses.init_pair(3, curses.COLOR_RED, -1)    # DONE
-        curses.init_pair(4, curses.COLOR_WHITE, curses.COLOR_BLUE) # Selected item
+        curses.init_pair(1, curses.COLOR_WHITE, -1)   # TODO - white
+        curses.init_pair(2, curses.COLOR_YELLOW, -1)  # DOING - yellow
+        curses.init_pair(3, curses.COLOR_GREEN, -1)   # DONE - green
+        curses.init_pair(4, curses.COLOR_RED, -1)     # IMPORTANT - red
+        curses.init_pair(5, curses.COLOR_WHITE, curses.COLOR_BLUE) # Selected item
         
         # Set cursor to invisible (optional)
         curses.curs_set(0)
+    
+    def ensure_todo_dir(self):
+        # Create the directory if it doesn't exist
+        if not os.path.exists(TODO_DIR):
+            os.makedirs(TODO_DIR)
         
     def load_tasks(self):
         self.tasks = []
@@ -90,6 +106,7 @@ class TodoApp:
         previous_state, previous_cursor = self.history.pop()
         self.tasks = previous_state
         self.cursor_pos = previous_cursor
+        self.save_tasks()
     
     def add_task(self):
         # Create a sub-window for input
@@ -120,26 +137,51 @@ class TodoApp:
             return
             
         self.add_to_history()
-        # Cycle through states: TODO -> DOING -> DONE -> TODO
-        self.tasks[self.cursor_pos].state = (self.tasks[self.cursor_pos].state + 1) % 3
+        # Cycle through states: TODO (white) -> DOING (yellow) -> DONE (green) -> IMPORTANT (red)
+        self.tasks[self.cursor_pos].state = (self.tasks[self.cursor_pos].state + 1) % 4
         self.save_tasks()
     
-    def mark_task_done(self):
+    def delete_task(self):
         if not self.tasks:
             return
             
         self.add_to_history()
-        self.tasks[self.cursor_pos].state = DONE
+        del self.tasks[self.cursor_pos]
+        if self.cursor_pos >= len(self.tasks) and len(self.tasks) > 0:
+            self.cursor_pos = len(self.tasks) - 1
+        self.save_tasks()
+    
+    def move_task(self, direction):
+        if not self.tasks or len(self.tasks) < 2:
+            return
+            
+        # Can't move up if at the top
+        if direction < 0 and self.cursor_pos == 0:
+            return
+            
+        # Can't move down if at the bottom
+        if direction > 0 and self.cursor_pos == len(self.tasks) - 1:
+            return
+            
+        self.add_to_history()
+        # Swap with the task in the direction
+        new_pos = self.cursor_pos + direction
+        self.tasks[self.cursor_pos], self.tasks[new_pos] = self.tasks[new_pos], self.tasks[self.cursor_pos]
+        self.cursor_pos = new_pos
         self.save_tasks()
     
     def display(self):
         self.stdscr.clear()
         h, w = self.stdscr.getmaxyx()
         
-        # Display header
-        header = " Todo List "
+        # Display header with date and username
+        current_date = "2025-06-07 16:40:23"  # From your input
+        username = "Arjun-G-Ravi"  # From your input
+        header = f" Todo List - {username} - {current_date} "
         self.stdscr.addstr(0, (w - len(header)) // 2, header, curses.A_BOLD)
-        self.stdscr.addstr(h-1, 2, "i: new task | space: cycle state | d: mark done | u: undo | q: quit")
+        
+        # Display keys at bottom
+        self.stdscr.addstr(h-1, 2, "i: new task | space: cycle state | d: delete | u: undo | Shift+↑/↓: move | q: quit")
         
         # Display tasks
         if not self.tasks:
@@ -148,22 +190,26 @@ class TodoApp:
             for idx, task in enumerate(self.tasks):
                 # Determine display attributes
                 if idx == self.cursor_pos:
-                    attr = curses.color_pair(4)  # Selected item
+                    attr = curses.color_pair(5)  # Selected item
                 else:
                     if task.state == TODO:
-                        attr = curses.color_pair(1)  # Green for TODO
+                        attr = curses.color_pair(1)  # White for TODO
                     elif task.state == DOING:
                         attr = curses.color_pair(2)  # Yellow for DOING
-                    else:  # DONE
-                        attr = curses.color_pair(3)  # Red for DONE
+                    elif task.state == DONE:
+                        attr = curses.color_pair(3)  # Green for DONE
+                    else:  # IMPORTANT
+                        attr = curses.color_pair(4)  # Red for IMPORTANT
                 
                 # Format the bullet based on state
                 if task.state == TODO:
                     bullet = "•"
                 elif task.state == DOING:
                     bullet = "~"
-                else:  # DONE
+                elif task.state == DONE:
                     bullet = "✓"
+                else:  # IMPORTANT
+                    bullet = "!"
                 
                 # Display the task if it fits in the window
                 if idx + 2 < h - 2:  # Account for header and footer
@@ -188,13 +234,19 @@ class TodoApp:
             elif key == curses.KEY_DOWN or key == ord('j'):
                 self.cursor_pos = min(len(self.tasks) - 1 if self.tasks else 0, self.cursor_pos + 1)
             
+            # Handle shift+arrow keys for moving tasks (KEY_SR is Shift+Up, KEY_SF is Shift+Down)
+            elif key == curses.KEY_SR:  # Shift+Up
+                self.move_task(-1)
+            elif key == curses.KEY_SF:  # Shift+Down
+                self.move_task(1)
+            
             # Handle commands
             elif key == ord('i'):  # Insert new task
                 self.add_task()
             elif key == ord(' '):  # Toggle task state
                 self.toggle_task_state()
-            elif key == ord('d'):  # Mark task as done
-                self.mark_task_done()
+            elif key == ord('d'):  # Delete task
+                self.delete_task()
             elif key == ord('u'):  # Undo
                 self.undo()
             elif key == ord('q'):  # Quit
