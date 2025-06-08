@@ -634,9 +634,21 @@ def main(stdscr):
     app = TodoApp(stdscr)
     app.run()
 
-if __name__ == "__main__":
+# if __name__ == "__main__":
+#     try:
+#         curses.wrapper(main)
+#     except KeyboardInterrupt:
+#         # Exit cleanly on Ctrl+C
+#         pass
+
+
+def main_wrapper():
+    """Entry point for the installed script"""
     try:
         curses.wrapper(main)
     except KeyboardInterrupt:
         # Exit cleanly on Ctrl+C
         pass
+
+if __name__ == "__main__":
+    main_wrapper()
