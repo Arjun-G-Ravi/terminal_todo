@@ -10,8 +10,6 @@ At the same time, you need to know or use zero vim to use this.
 
 # Installation(currently supports only debian based systems like Ubuntu and Linux Mint)
 
-1. Download the `.deb` file: `https://github.com/Arjun-G-Ravi/terminal_todo/raw/refs/heads/main/releases/python3-terminal-todo_0.1.0-1_all.deb`
+1. Download the `.deb` file: `wget https://github.com/Arjun-G-Ravi/terminal_todo/raw/refs/heads/main/releases/python3-terminal-todo_0.1.0-1_all.deb`
 2. Install the `.deb` file: `sudo dpkg -i python3-terminal-todo_0.1.0-1_all.deb`
 
-
-https://github.com/Arjun-G-Ravi/terminal_todo/blob/main/releases/python3-terminal-todo_0.1.0-1_all.deb
