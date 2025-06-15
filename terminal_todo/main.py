@@ -39,8 +39,8 @@ def get_todo_dir():
         with open(TODO_CONFIG, 'r') as f:
             config_content = f.read()
             
-        # Extract the path using a safer approach than exec
-        path_match = re.search(r'TODO_PATH\s*=\s*[\'"](.+?)[\'"]', config_content)
+        # Extract the path using a safer approach than exec (ignore commented lines)
+        path_match = re.search(r'^(?!\s*#).*TODO_PATH\s*=\s*[\'"](.+?)[\'"]', config_content, re.MULTILINE)
         if path_match:
             todo_dir = path_match.group(1)
     except Exception as e:
