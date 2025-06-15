@@ -3,6 +3,7 @@ import os
 import signal
 import sys
 from pathlib import Path
+import re
 
 # Task states
 TODO = 0
@@ -10,10 +11,47 @@ DOING = 1
 DONE = 2
 IMPORTANT = 3  # Added for the 4th color state
 
-# Get the user's home directory for Linux
+# Config file and directory paths
 HOME_DIR = str(Path.home())
-TODO_DIR = os.path.join(HOME_DIR, ".local", "share", "todo")
-TODO_FILE = os.path.join(TODO_DIR, "tasks.md")
+CONFIG_DIR = os.path.join(HOME_DIR, ".config", "todo")
+TODO_CONFIG = os.path.join(CONFIG_DIR, "config.py")
+TODO_DIR_DEFAULT = os.path.join(HOME_DIR, ".local", "share", "todo")
+
+def ensure_config_dir():
+    """Create config directory if it doesn't exist"""
+    if not os.path.exists(CONFIG_DIR):
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+
+def create_default_config():
+    """Create default config file if it doesn't exist"""
+    ensure_config_dir()
+    if not os.path.exists(TODO_CONFIG):
+        with open(TODO_CONFIG, 'w') as f:
+            f.write(f'TODO_PATH = "{TODO_DIR_DEFAULT}"\n')
+
+def get_todo_dir():
+    """Get the todo directory from config file or use default"""
+    create_default_config()
+    
+    # Load config file
+    todo_dir = TODO_DIR_DEFAULT
+    try:
+        with open(TODO_CONFIG, 'r') as f:
+            config_content = f.read()
+            
+        # Extract the path using a safer approach than exec
+        path_match = re.search(r'TODO_PATH\s*=\s*[\'"](.+?)[\'"]', config_content)
+        if path_match:
+            todo_dir = path_match.group(1)
+    except Exception as e:
+        # If there's any error, use the default path
+        pass
+    
+    # Ensure the directory exists
+    if not os.path.exists(todo_dir):
+        os.makedirs(todo_dir, exist_ok=True)
+    
+    return todo_dir
 
 class Task:
     def __init__(self, text, state=TODO):
@@ -76,17 +114,27 @@ class TodoApp:
         self.needs_regrouping = True
         self.last_display_size = (0, 0)
     
+    @property
+    def todo_dir(self):
+        """Get the current todo directory (dynamic)"""
+        return get_todo_dir()
+    
+    @property
+    def todo_file(self):
+        """Get the current todo file path (dynamic)"""
+        return os.path.join(self.todo_dir, "tasks.md")
+    
     def ensure_todo_dir(self):
         # Create the directory if it doesn't exist
-        if not os.path.exists(TODO_DIR):
-            os.makedirs(TODO_DIR)
+        if not os.path.exists(self.todo_dir):
+            os.makedirs(self.todo_dir)
         
     def load_tasks(self):
         self.tasks = []
-        if not os.path.exists(TODO_FILE):
+        if not os.path.exists(self.todo_file):
             return
         
-        with open(TODO_FILE, "r", encoding="utf-8") as f:
+        with open(self.todo_file, "r", encoding="utf-8") as f:
             for line in f:
                 task = Task.from_markdown(line.strip())
                 if task:
@@ -97,7 +145,7 @@ class TodoApp:
             self.cursor_pos = len(self.tasks) - 1
     
     def save_tasks(self):
-        with open(TODO_FILE, "w", encoding="utf-8") as f:
+        with open(self.todo_file, "w", encoding="utf-8") as f:
             for task in self.tasks:
                 f.write(f"{task.to_markdown()}\n")
         # Mark that we need to regroup tasks on next display
