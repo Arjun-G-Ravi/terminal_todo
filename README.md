@@ -11,7 +11,7 @@ At the same time, you need to know or use zero vim to use this.
 
 1. Download the `.deb` file:
 
-`wget -O python3-terminal-todo_0.1.0-1_all.deb https://github.com/Arjun-G-Ravi/terminal_todo/raw/refs/heads/main/releases/terminal-todo_0.2.0-1.deb`
+`wget -O terminal-todo_0.2.0-1.deb https://github.com/Arjun-G-Ravi/terminal_todo/raw/refs/heads/main/releases/terminal-todo_0.2.0-1.deb`
 
 2. Install the `.deb` file:
 
