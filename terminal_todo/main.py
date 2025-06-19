@@ -10,7 +10,8 @@ TODO = 0
 DOING = 1
 DONE = 2
 IMPORTANT = 3  # Added for the 4th color state
-HEADING = 4    # Added for headings
+NOT_IMPORTANT = 4  # Added for the 5th color state - dimmed
+HEADING = 5    # Added for headings
 
 # Config file and directory paths
 HOME_DIR = str(Path.home())
@@ -29,6 +30,7 @@ def create_default_config():
     if not os.path.exists(TODO_CONFIG):
         with open(TODO_CONFIG, 'w') as f:
             f.write(f'TODO_PATH = "{TODO_DIR_DEFAULT}"\n')
+            f.write(f'VIEW_MODE = 0\n')  # Default to normal view
 
 def get_todo_dir():
     """Get the todo directory from config file or use default"""
@@ -54,6 +56,59 @@ def get_todo_dir():
     
     return todo_dir
 
+def get_view_mode():
+    """Get the saved view mode from config file or use default"""
+    create_default_config()
+    
+    # Load config file
+    view_mode = 0  # Default to normal view
+    try:
+        with open(TODO_CONFIG, 'r') as f:
+            config_content = f.read()
+            
+        # Extract the view mode using regex (ignore commented lines)
+        view_match = re.search(r'^(?!\s*#).*VIEW_MODE\s*=\s*(\d+)', config_content, re.MULTILINE)
+        if view_match:
+            view_mode = int(view_match.group(1))
+            # Ensure it's a valid view mode (0, 1, or 2)
+            if view_mode not in [0, 1, 2]:
+                view_mode = 0
+    except Exception:
+        # If there's any error, use the default view mode
+        pass
+    
+    return view_mode
+
+def save_view_mode(view_mode):
+    """Save the current view mode to config file"""
+    create_default_config()
+    
+    try:
+        # Read current config
+        config_lines = []
+        if os.path.exists(TODO_CONFIG):
+            with open(TODO_CONFIG, 'r') as f:
+                config_lines = f.readlines()
+        
+        # Update or add VIEW_MODE line
+        view_mode_updated = False
+        for i, line in enumerate(config_lines):
+            if re.match(r'^(?!\s*#).*VIEW_MODE\s*=', line):
+                config_lines[i] = f'VIEW_MODE = {view_mode}\n'
+                view_mode_updated = True
+                break
+        
+        # If VIEW_MODE line wasn't found, add it
+        if not view_mode_updated:
+            config_lines.append(f'VIEW_MODE = {view_mode}\n')
+        
+        # Write back to file
+        with open(TODO_CONFIG, 'w') as f:
+            f.writelines(config_lines)
+    except Exception:
+        # If there's any error saving, silently continue
+        pass
+
 class Task:
     def __init__(self, text, state=TODO):
         self.text = text
@@ -71,6 +126,8 @@ class Task:
             return Task(line[6:].strip(), DONE)
         elif line.startswith("- [!] "):
             return Task(line[6:].strip(), IMPORTANT)
+        elif line.startswith("- [-] "):
+            return Task(line[6:].strip(), NOT_IMPORTANT)
         return None
 
     def to_markdown(self):
@@ -82,15 +139,17 @@ class Task:
             return f"- [~] {self.text}"
         elif self.state == DONE:
             return f"- [x] {self.text}"
-        else:  # IMPORTANT
+        elif self.state == IMPORTANT:
             return f"- [!] {self.text}"
+        else:  # NOT_IMPORTANT
+            return f"- [-] {self.text}"
 
 class TodoApp:
     def __init__(self, stdscr):
         self.stdscr = stdscr
         self.tasks = []
         self.cursor_pos = 0
-        self.view_mode = 0  # 0 = normal, 1 = grouped by state, 2 = grouped by heading
+        self.view_mode = get_view_mode()  # Load saved view mode instead of defaulting to 0
         self.ensure_todo_dir()
         self.load_tasks()
         self.history = []  # For undo functionality
@@ -105,6 +164,7 @@ class TodoApp:
         curses.init_pair(4, curses.COLOR_RED, -1)     # IMPORTANT - red
         curses.init_pair(5, curses.COLOR_WHITE, curses.COLOR_BLUE) # Selected item
         curses.init_pair(6, curses.COLOR_CYAN, -1)    # HEADING - cyan
+        curses.init_pair(7, curses.COLOR_BLACK, -1)   # NOT_IMPORTANT - dimmed (dark gray)
         
         # Set cursor to invisible
         curses.curs_set(0)
@@ -183,14 +243,42 @@ class TodoApp:
         self.cursor_pos = previous_cursor
         self.save_tasks()
     
-    def add_task(self):
+    def add_task(self, at_bottom=False):
         # Use enhanced text input
         task_text = self._enhanced_text_input("Enter new task: ")
         
         if task_text.strip():
             self.add_to_history()
-            self.tasks.append(Task(task_text.strip()))
-            self.cursor_pos = len(self.tasks) - 1
+            new_task = Task(task_text.strip())
+            
+            if at_bottom:
+                # Add at the very bottom (for 'o' key)
+                self.tasks.append(new_task)
+                self.cursor_pos = len(self.tasks) - 1
+            else:
+                # Add just below current cursor position (for 'i' key)
+                if not self.tasks:
+                    # If no tasks, just add it
+                    self.tasks.append(new_task)
+                    self.cursor_pos = 0
+                else:
+                    # Get actual task index if in grouped view
+                    actual_index = self.get_actual_task_index()
+                    if actual_index == -1:
+                        # If cursor is invalid, add at end
+                        self.tasks.append(new_task)
+                        self.cursor_pos = len(self.tasks) - 1
+                    else:
+                        # Insert after current position
+                        insert_pos = actual_index + 1
+                        self.tasks.insert(insert_pos, new_task)
+                        # Update cursor position to the new task
+                        if self.view_mode == 0:  # Normal view
+                            self.cursor_pos = insert_pos
+                        else:
+                            # In grouped views, we'll need to refresh to see the new task
+                            self.needs_regrouping = True
+            
             self.save_tasks()
             self.needs_regrouping = True
     
@@ -201,8 +289,30 @@ class TodoApp:
         
         if heading_text.strip():
             self.add_to_history()
-            self.tasks.append(Task(heading_text.strip(), HEADING))
-            self.cursor_pos = len(self.tasks) - 1
+            new_heading = Task(heading_text.strip(), HEADING)
+            
+            if not self.tasks:
+                # If no tasks, just add it
+                self.tasks.append(new_heading)
+                self.cursor_pos = 0
+            else:
+                # Get actual task index if in grouped view
+                actual_index = self.get_actual_task_index()
+                if actual_index == -1:
+                    # If cursor is invalid, add at end
+                    self.tasks.append(new_heading)
+                    self.cursor_pos = len(self.tasks) - 1
+                else:
+                    # Insert after current position
+                    insert_pos = actual_index + 1
+                    self.tasks.insert(insert_pos, new_heading)
+                    # Update cursor position to the new heading
+                    if self.view_mode == 0:  # Normal view
+                        self.cursor_pos = insert_pos
+                    else:
+                        # In grouped views, we'll need to refresh to see the new heading
+                        self.needs_regrouping = True
+            
             self.save_tasks()
             self.needs_regrouping = True
 
@@ -235,9 +345,11 @@ class TodoApp:
         # Reset cursor position when changing views
         self.cursor_pos = min(self.cursor_pos, len(self.tasks) - 1 if self.tasks else 0)
         self.needs_regrouping = True
+        # Save the new view mode to config file
+        save_view_mode(self.view_mode)
 
     def cycle_all_states(self):
-        """Cycle through all 4 states - for 'c' key (skip heading state for tasks)"""
+        """Cycle through all 5 states - for 'c' key (skip heading state for tasks)"""
         if not self.tasks:
             return
             
@@ -251,8 +363,8 @@ class TodoApp:
             return
             
         self.add_to_history()
-        # Cycle through task states only: TODO -> DOING -> DONE -> IMPORTANT -> TODO
-        self.tasks[task_index].state = (self.tasks[task_index].state + 1) % 4
+        # Cycle through task states only: TODO -> DOING -> DONE -> IMPORTANT -> NOT_IMPORTANT -> TODO
+        self.tasks[task_index].state = (self.tasks[task_index].state + 1) % 5
         self.save_tasks()
         self.needs_regrouping = True
     
@@ -375,6 +487,8 @@ class TodoApp:
                     attr = curses.color_pair(3)  # Green for DONE
                 elif task.state == IMPORTANT:
                     attr = curses.color_pair(4)  # Red for IMPORTANT
+                elif task.state == NOT_IMPORTANT:
+                    attr = curses.color_pair(7)  # Dark gray for NOT_IMPORTANT
                 else:  # HEADING
                     attr = curses.color_pair(6) | curses.A_BOLD  # Cyan and bold for HEADING
             
@@ -387,8 +501,10 @@ class TodoApp:
                 text = f" ~ {task.text}"
             elif task.state == DONE:
                 text = f" ✓ {task.text}"
-            else:  # IMPORTANT
+            elif task.state == IMPORTANT:
                 text = f" ! {task.text}"
+            else:  # NOT_IMPORTANT
+                text = f" - {task.text}"
             
             self.safe_addstr(idx + 2, 2, text, attr)
 
@@ -408,12 +524,14 @@ class TodoApp:
             done_tasks = [(i, t) for i, t in enumerate(self.tasks) if t.state == DONE]
             doing_tasks = [(i, t) for i, t in enumerate(self.tasks) if t.state == DOING]
             important_tasks = [(i, t) for i, t in enumerate(self.tasks) if t.state == IMPORTANT]
+            not_important_tasks = [(i, t) for i, t in enumerate(self.tasks) if t.state == NOT_IMPORTANT]
             
             self.grouped_tasks = {
                 'todo': todo_tasks,
                 'done': done_tasks,
                 'doing': doing_tasks,
-                'important': important_tasks
+                'important': important_tasks,
+                'not_important': not_important_tasks
             }
             
             self.needs_regrouping = False
@@ -515,6 +633,30 @@ class TodoApp:
                 self.safe_addstr(row, 2, text, attr)
                 row += 1
                 display_idx += 1
+            
+            # Add space after group
+            row += 1
+        
+        # NOT_IMPORTANT tasks (dimmed)
+        if self.grouped_tasks['not_important'] and row < h - 2:
+            self.safe_addstr(row, 2, "NOT IMPORTANT:", curses.A_BOLD)
+            row += 1
+            
+            for original_idx, task in self.grouped_tasks['not_important']:
+                if row >= h - 2:
+                    break
+                    
+                # Add to mapping
+                self.visible_task_indices.append(original_idx)
+                
+                # Determine if this is the selected task
+                is_selected = display_idx == self.cursor_pos
+                attr = curses.color_pair(5) if is_selected else curses.color_pair(7)
+                
+                text = f" - {task.text}"
+                self.safe_addstr(row, 2, text, attr)
+                row += 1
+                display_idx += 1
                 
         # Make sure cursor doesn't go beyond visible tasks
         if self.visible_task_indices and self.cursor_pos >= len(self.visible_task_indices):
@@ -588,8 +730,10 @@ class TodoApp:
                     attr = curses.color_pair(2)
                 elif task.state == DONE:
                     attr = curses.color_pair(3)
-                else:  # IMPORTANT
+                elif task.state == IMPORTANT:
                     attr = curses.color_pair(4)
+                else:  # NOT_IMPORTANT
+                    attr = curses.color_pair(7)
             
             # Format the task
             if task.state == TODO:
@@ -598,8 +742,10 @@ class TodoApp:
                 bullet = "~"
             elif task.state == DONE:
                 bullet = "✓"
-            else:  # IMPORTANT
+            elif task.state == IMPORTANT:
                 bullet = "!"
+            else:  # NOT_IMPORTANT
+                bullet = "."
             
             text = f"  {bullet} {task.text}"  # Extra indent for tasks under headings
             self.safe_addstr(row, 2, text, attr)
@@ -680,7 +826,7 @@ class TodoApp:
                 ord('J'): lambda: self.move_task(1),
                 ord('K'): lambda: self.move_task(-1),
                 ord('i'): self.add_task,
-                ord('o'): self.add_task,
+                ord('o'): lambda: self.add_task(at_bottom=True),
                 ord('h'): self.add_heading,  # Changed from toggle to add heading
                 ord('e'): self.edit_task,
                 ord(' '): self.toggle_task_state_simple,
