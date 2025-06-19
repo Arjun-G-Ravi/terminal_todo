@@ -10,6 +10,7 @@ TODO = 0
 DOING = 1
 DONE = 2
 IMPORTANT = 3  # Added for the 4th color state
+HEADING = 4    # Added for headings
 
 # Config file and directory paths
 HOME_DIR = str(Path.home())
@@ -60,7 +61,9 @@ class Task:
     
     @staticmethod
     def from_markdown(line):
-        if line.startswith("- [ ] "):
+        if line.startswith("## "):
+            return Task(line[3:].strip(), HEADING)
+        elif line.startswith("- [ ] "):
             return Task(line[6:].strip(), TODO)
         elif line.startswith("- [~] "):
             return Task(line[6:].strip(), DOING)
@@ -71,7 +74,9 @@ class Task:
         return None
 
     def to_markdown(self):
-        if self.state == TODO:
+        if self.state == HEADING:
+            return f"## {self.text}"
+        elif self.state == TODO:
             return f"- [ ] {self.text}"
         elif self.state == DOING:
             return f"- [~] {self.text}"
@@ -85,7 +90,7 @@ class TodoApp:
         self.stdscr = stdscr
         self.tasks = []
         self.cursor_pos = 0
-        self.view_mode = 0  # 0 = normal, 1 = grouped
+        self.view_mode = 0  # 0 = normal, 1 = grouped by state, 2 = grouped by heading
         self.ensure_todo_dir()
         self.load_tasks()
         self.history = []  # For undo functionality
@@ -99,13 +104,14 @@ class TodoApp:
         curses.init_pair(3, curses.COLOR_GREEN, -1)   # DONE - green
         curses.init_pair(4, curses.COLOR_RED, -1)     # IMPORTANT - red
         curses.init_pair(5, curses.COLOR_WHITE, curses.COLOR_BLUE) # Selected item
+        curses.init_pair(6, curses.COLOR_CYAN, -1)    # HEADING - cyan
         
         # Set cursor to invisible
         curses.curs_set(0)
         
-        # Setup for key input
+        # Setup for key input - FIXED: Remove timeout to prevent glitching
         self.stdscr.keypad(True)
-        self.stdscr.timeout(100)  # Makes getch non-blocking with a timeout
+        # Remove the timeout that was causing rapid refreshes
         
         self.last_key = -1
         
@@ -113,6 +119,11 @@ class TodoApp:
         self.grouped_tasks = None
         self.needs_regrouping = True
         self.last_display_size = (0, 0)
+        
+        # Add display caching to prevent unnecessary redraws
+        self.needs_redraw = True
+        self.last_cursor_pos = -1
+        self.last_view_mode = -1
     
     @property
     def todo_dir(self):
@@ -195,6 +206,30 @@ class TodoApp:
             self.save_tasks()
             self.needs_regrouping = True
     
+    def add_heading(self):
+        """Add a new heading"""
+        # Create a sub-window for input
+        h, w = self.stdscr.getmaxyx()
+        input_win = curses.newwin(1, w-10, h-2, 5)
+        curses.echo()
+        curses.curs_set(1)  # Show cursor
+        
+        self.stdscr.addstr(h-3, 2, "Enter heading: ")
+        self.stdscr.refresh()
+        
+        curses.curs_set(1)
+        input_win.clear()
+        heading_text = input_win.getstr().decode('utf-8')
+        curses.noecho()
+        curses.curs_set(0)  # Hide cursor again
+        
+        if heading_text.strip():
+            self.add_to_history()
+            self.tasks.append(Task(heading_text.strip(), HEADING))
+            self.cursor_pos = len(self.tasks) - 1
+            self.save_tasks()
+            self.needs_regrouping = True
+
     def edit_task(self):
         """Edit the selected task"""
         if not self.tasks:
@@ -276,15 +311,46 @@ class TodoApp:
             self.tasks[task_index].text = editing_text.strip()
             self.save_tasks()
             self.needs_regrouping = True
+
+    def toggle_view_mode(self):
+        """Toggle between normal, grouped by state, and grouped by heading view modes"""
+        self.view_mode = (self.view_mode + 1) % 3
+        # Reset cursor position when changing views
+        self.cursor_pos = min(self.cursor_pos, len(self.tasks) - 1 if self.tasks else 0)
+        self.needs_regrouping = True
+
+    def cycle_all_states(self):
+        """Cycle through all 4 states - for 'c' key (skip heading state for tasks)"""
+        if not self.tasks:
+            return
+            
+        # If in grouped view, map cursor position to actual task index
+        task_index = self.get_actual_task_index()
+        if task_index == -1:
+            return
+        
+        # Don't cycle headings
+        if self.tasks[task_index].state == HEADING:
+            return
+            
+        self.add_to_history()
+        # Cycle through task states only: TODO -> DOING -> DONE -> IMPORTANT -> TODO
+        self.tasks[task_index].state = (self.tasks[task_index].state + 1) % 4
+        self.save_tasks()
+        self.needs_regrouping = True
     
     def toggle_task_state_simple(self):
-        """Toggle between white (TODO) and green (DONE) only - for spacebar and alt"""
+        """Toggle between white (TODO) and green (DONE) only - for spacebar"""
         if not self.tasks:
             return
         
         # If in grouped view, map cursor position to actual task index
         task_index = self.get_actual_task_index()
         if task_index == -1:
+            return
+        
+        # Don't toggle headings
+        if self.tasks[task_index].state == HEADING:
             return
             
         self.add_to_history()
@@ -294,29 +360,6 @@ class TodoApp:
         else:
             self.tasks[task_index].state = TODO
         self.save_tasks()
-        self.needs_regrouping = True
-    
-    def cycle_all_states(self):
-        """Cycle through all 4 states - for 'o' key"""
-        if not self.tasks:
-            return
-            
-        # If in grouped view, map cursor position to actual task index
-        task_index = self.get_actual_task_index()
-        if task_index == -1:
-            return
-            
-        self.add_to_history()
-        # Cycle through all states: TODO -> DOING -> DONE -> IMPORTANT -> TODO
-        self.tasks[task_index].state = (self.tasks[task_index].state + 1) % 4
-        self.save_tasks()
-        self.needs_regrouping = True
-    
-    def toggle_view_mode(self):
-        """Toggle between normal and grouped view modes"""
-        self.view_mode = (self.view_mode + 1) % 2
-        # Reset cursor position when changing views
-        self.cursor_pos = min(self.cursor_pos, len(self.tasks) - 1 if self.tasks else 0)
         self.needs_regrouping = True
     
     def delete_task(self):
@@ -395,7 +438,7 @@ class TodoApp:
         self.visible_task_indices = list(range(len(self.tasks)))
         
         if not self.tasks:
-            self.safe_addstr(2, 2, "No tasks yet. Press 'i' to add a task.")
+            self.safe_addstr(2, 2, "No tasks yet. Press 'i' to add a task or 'h' to add a heading.")
             return
             
         for idx, task in enumerate(self.tasks):
@@ -413,29 +456,31 @@ class TodoApp:
                     attr = curses.color_pair(2)  # Yellow for DOING
                 elif task.state == DONE:
                     attr = curses.color_pair(3)  # Green for DONE
-                else:  # IMPORTANT
+                elif task.state == IMPORTANT:
                     attr = curses.color_pair(4)  # Red for IMPORTANT
+                else:  # HEADING
+                    attr = curses.color_pair(6) | curses.A_BOLD  # Cyan and bold for HEADING
             
-            # Format the bullet based on state
-            if task.state == TODO:
-                bullet = "-"  # Changed to dash for normal tasks
+            # Format the display based on state
+            if task.state == HEADING:
+                text = f"## {task.text}"
+            elif task.state == TODO:
+                text = f" - {task.text}"
             elif task.state == DOING:
-                bullet = "~"
+                text = f" ~ {task.text}"
             elif task.state == DONE:
-                bullet = "✓"  # Check mark for done tasks
+                text = f" ✓ {task.text}"
             else:  # IMPORTANT
-                bullet = "!"
+                text = f" ! {task.text}"
             
-            # Display the task
-            text = f" {bullet} {task.text}"
             self.safe_addstr(idx + 2, 2, text, attr)
-    
+
     def display_grouped_view(self, h, w):
         """Display tasks grouped by state with caching for performance"""
         self.visible_task_indices = []  # Reset mapping
         
         if not self.tasks:
-            self.safe_addstr(2, 2, "No tasks yet. Press 'i' to add a task.")
+            self.safe_addstr(2, 2, "No tasks yet. Press 'i' to add a task or 'h' to add a heading.")
             return
             
         # Only regroup tasks if needed (optimization)
@@ -558,6 +603,94 @@ class TodoApp:
         if self.visible_task_indices and self.cursor_pos >= len(self.visible_task_indices):
             self.cursor_pos = len(self.visible_task_indices) - 1
     
+    def display_heading_grouped_view(self, h, w):
+        """Display tasks grouped by heading"""
+        self.visible_task_indices = []  # Reset mapping
+        
+        if not self.tasks:
+            self.safe_addstr(2, 2, "No tasks yet. Press 'i' to add a task or 'h' to add a heading.")
+            return
+        
+        row = 2
+        display_idx = 0
+        current_heading = "Ungrouped Tasks"
+        tasks_under_current_heading = []
+        
+        # Group tasks by heading
+        for i, task in enumerate(self.tasks):
+            if task.state == HEADING:
+                # Display previous group if it has tasks
+                if tasks_under_current_heading:
+                    row = self._display_heading_group(current_heading, tasks_under_current_heading, row, h, display_idx)
+                    display_idx += len(tasks_under_current_heading)
+                    tasks_under_current_heading = []
+                
+                # Start new heading group
+                current_heading = task.text
+                # Add the heading itself to visible indices
+                self.visible_task_indices.append(i)
+                
+                # Display the heading
+                is_selected = display_idx == self.cursor_pos
+                attr = curses.color_pair(5) if is_selected else (curses.color_pair(6) | curses.A_BOLD)
+                self.safe_addstr(row, 2, f"## {task.text}", attr)
+                row += 1
+                display_idx += 1
+            else:
+                tasks_under_current_heading.append((i, task))
+        
+        # Display the last group
+        if tasks_under_current_heading:
+            self._display_heading_group(current_heading, tasks_under_current_heading, row, h, display_idx)
+        
+        # Make sure cursor doesn't go beyond visible tasks
+        if self.visible_task_indices and self.cursor_pos >= len(self.visible_task_indices):
+            self.cursor_pos = len(self.visible_task_indices) - 1
+
+    def _display_heading_group(self, heading, tasks, start_row, max_h, start_display_idx):
+        """Helper method to display a group of tasks under a heading"""
+        row = start_row
+        display_idx = start_display_idx
+        
+        for original_idx, task in tasks:
+            if row >= max_h - 2:
+                break
+                
+            # Add to mapping
+            self.visible_task_indices.append(original_idx)
+            
+            # Determine if this is the selected task
+            is_selected = display_idx == self.cursor_pos
+            
+            if is_selected:
+                attr = curses.color_pair(5)
+            else:
+                if task.state == TODO:
+                    attr = curses.color_pair(1)
+                elif task.state == DOING:
+                    attr = curses.color_pair(2)
+                elif task.state == DONE:
+                    attr = curses.color_pair(3)
+                else:  # IMPORTANT
+                    attr = curses.color_pair(4)
+            
+            # Format the task
+            if task.state == TODO:
+                bullet = "-"
+            elif task.state == DOING:
+                bullet = "~"
+            elif task.state == DONE:
+                bullet = "✓"
+            else:  # IMPORTANT
+                bullet = "!"
+            
+            text = f"  {bullet} {task.text}"  # Extra indent for tasks under headings
+            self.safe_addstr(row, 2, text, attr)
+            row += 1
+            display_idx += 1
+        
+        return row + 1  # Add space after group
+
     def display(self):
         self.stdscr.clear()
         h, w = self.stdscr.getmaxyx()
@@ -568,16 +701,24 @@ class TodoApp:
         if len(header) < w:
             self.safe_addstr(0, (w - len(header)) // 2, header, curses.A_BOLD)
         
-        # Display help at bottom - removed 'a:new'
-        view_text = "NORMAL VIEW" if self.view_mode == 0 else "GROUPED VIEW"
-        help_text = f"i: add | d:delete | space/h:toggle | q:quit | e:edit | c:cycle-all | v:{view_text} | u:undo | Shift+arrows/jk:move"
+        # Display help at bottom
+        if self.view_mode == 0:
+            view_text = "NORMAL VIEW"
+        elif self.view_mode == 1:
+            view_text = "STATE GROUPED"
+        else:
+            view_text = "HEADING GROUPED"
+            
+        help_text = f"i: add | h:heading | d:delete | space:toggle | q:quit | e:edit | c:cycle-all | v:{view_text} | u:undo | Shift+arrows/jk:move"
         self.safe_addstr(h-1, 2, help_text)
         
         # Display tasks based on view mode
         if self.view_mode == 0:
             self.display_normal_view(h, w)
-        else:
+        elif self.view_mode == 1:
             self.display_grouped_view(h, w)
+        else:  # self.view_mode == 2
+            self.display_heading_grouped_view(h, w)
         
         self.stdscr.refresh()
     
@@ -623,9 +764,9 @@ class TodoApp:
                 ord('K'): lambda: self.move_task(-1),
                 ord('i'): self.add_task,
                 ord('o'): self.add_task,
+                ord('h'): self.add_heading,  # Changed from toggle to add heading
                 ord('e'): self.edit_task,
                 ord(' '): self.toggle_task_state_simple,
-                ord('h'): self.toggle_task_state_simple,
                 ord('c'): self.cycle_all_states,
                 ord('v'): self.toggle_view_mode,
                 ord('d'): self.delete_task,
@@ -681,14 +822,6 @@ def main(stdscr):
     
     app = TodoApp(stdscr)
     app.run()
-
-# if __name__ == "__main__":
-#     try:
-#         curses.wrapper(main)
-#     except KeyboardInterrupt:
-#         # Exit cleanly on Ctrl+C
-#         pass
-
 
 def main_wrapper():
     """Entry point for the installed script"""
