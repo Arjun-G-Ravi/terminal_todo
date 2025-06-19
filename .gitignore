@@ -1,3 +1,4 @@
 terminal_todo.egg-info/
 deb_dist/
 dist/
+build/
