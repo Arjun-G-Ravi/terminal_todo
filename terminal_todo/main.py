@@ -184,20 +184,8 @@ class TodoApp:
         self.save_tasks()
     
     def add_task(self):
-        # Create a sub-window for input
-        h, w = self.stdscr.getmaxyx()
-        input_win = curses.newwin(1, w-10, h-2, 5)
-        curses.echo()
-        curses.curs_set(1)  # Show cursor
-        
-        self.stdscr.addstr(h-3, 2, "Enter new task: ")
-        self.stdscr.refresh()
-        
-        curses.curs_set(1)
-        input_win.clear()
-        task_text = input_win.getstr().decode('utf-8')
-        curses.noecho()
-        curses.curs_set(0)  # Hide cursor again
+        # Use enhanced text input
+        task_text = self._enhanced_text_input("Enter new task: ")
         
         if task_text.strip():
             self.add_to_history()
@@ -208,20 +196,8 @@ class TodoApp:
     
     def add_heading(self):
         """Add a new heading"""
-        # Create a sub-window for input
-        h, w = self.stdscr.getmaxyx()
-        input_win = curses.newwin(1, w-10, h-2, 5)
-        curses.echo()
-        curses.curs_set(1)  # Show cursor
-        
-        self.stdscr.addstr(h-3, 2, "Enter heading: ")
-        self.stdscr.refresh()
-        
-        curses.curs_set(1)
-        input_win.clear()
-        heading_text = input_win.getstr().decode('utf-8')
-        curses.noecho()
-        curses.curs_set(0)  # Hide cursor again
+        # Use enhanced text input
+        heading_text = self._enhanced_text_input("Enter heading: ")
         
         if heading_text.strip():
             self.add_to_history()
@@ -243,72 +219,13 @@ class TodoApp:
         # Get current task text
         current_text = self.tasks[task_index].text
         
-        # Create a sub-window for input
-        h, w = self.stdscr.getmaxyx()
-        
-        # Clear the bottom area first
-        for y in range(h-3, h):
-            self.stdscr.move(y, 0)
-            self.stdscr.clrtoeol()
-        
-        # Display prompt
-        self.stdscr.addstr(h-3, 2, "Edit task: ")
-        self.stdscr.refresh()
-        
-        # Create a dedicated window for text input
-        edit_win = curses.newwin(1, w-10, h-2, 5)
-        edit_win.keypad(True)  # Enable special keys
-        
-        # Initialize editing with the current text
-        editing_text = current_text
-        cursor_pos = len(editing_text)
-        
-        # Enable cursor visibility
-        curses.curs_set(1)
-        
-        # Process key inputs for the edit window
-        while True:
-            # Display the current text
-            edit_win.clear()
-            edit_win.addstr(0, 0, editing_text)
-            edit_win.move(0, cursor_pos)  # Position cursor
-            edit_win.refresh()
-            
-            # Get key input
-            ch = edit_win.getch()
-            
-            # Handle key presses
-            if ch == curses.KEY_ENTER or ch == 10 or ch == 13:  # Enter key
-                break
-            elif ch == 27:  # Escape key - cancel edit
-                editing_text = current_text  # Revert to original
-                break
-            elif ch == curses.KEY_BACKSPACE or ch == 127 or ch == 8:  # Backspace
-                if cursor_pos > 0:
-                    editing_text = editing_text[:cursor_pos-1] + editing_text[cursor_pos:]
-                    cursor_pos -= 1
-            elif ch == curses.KEY_DC:  # Delete key
-                if cursor_pos < len(editing_text):
-                    editing_text = editing_text[:cursor_pos] + editing_text[cursor_pos+1:]
-            elif ch == curses.KEY_LEFT:  # Left arrow
-                cursor_pos = max(0, cursor_pos - 1)
-            elif ch == curses.KEY_RIGHT:  # Right arrow
-                cursor_pos = min(len(editing_text), cursor_pos + 1)
-            elif ch == curses.KEY_HOME:  # Home key
-                cursor_pos = 0
-            elif ch == curses.KEY_END:  # End key
-                cursor_pos = len(editing_text)
-            elif 32 <= ch <= 126:  # Printable characters
-                editing_text = editing_text[:cursor_pos] + chr(ch) + editing_text[cursor_pos:]
-                cursor_pos += 1
-        
-        # Restore cursor visibility setting
-        curses.curs_set(0)
+        # Use enhanced text input with pre-filled text
+        edited_text = self._enhanced_text_input("Edit task: ", current_text)
         
         # Save the edited text if changed
-        if editing_text.strip() and editing_text != current_text:
+        if edited_text.strip() and edited_text != current_text:
             self.add_to_history()
-            self.tasks[task_index].text = editing_text.strip()
+            self.tasks[task_index].text = edited_text.strip()
             self.save_tasks()
             self.needs_regrouping = True
 
@@ -812,6 +729,181 @@ class TodoApp:
         """Helper method for down key logic (extracted to avoid duplication)"""
         visible_tasks = len(self.visible_task_indices) if self.view_mode == 1 else len(self.tasks)
         self.cursor_pos = min(visible_tasks - 1 if visible_tasks else 0, self.cursor_pos + 1)
+
+    def _find_word_boundary_left(self, text, pos):
+        """Find the start of the current word to the left of the cursor"""
+        if pos <= 0:
+            return 0
+        
+        # Skip any whitespace to the left
+        while pos > 0 and text[pos - 1].isspace():
+            pos -= 1
+        
+        # Skip non-whitespace characters to find word boundary
+        while pos > 0 and not text[pos - 1].isspace():
+            pos -= 1
+        
+        return pos
+    
+    def _find_word_boundary_right(self, text, pos):
+        """Find the end of the current word to the right of the cursor"""
+        if pos >= len(text):
+            return len(text)
+        
+        # Skip any whitespace to the right
+        while pos < len(text) and text[pos].isspace():
+            pos += 1
+        
+        # Skip non-whitespace characters to find word boundary
+        while pos < len(text) and not text[pos].isspace():
+            pos += 1
+        
+        return pos
+    
+    def _enhanced_text_input(self, prompt, initial_text=""):
+        """Enhanced text input with Ctrl+Backspace and Ctrl+Arrow support"""
+        h, w = self.stdscr.getmaxyx()
+        
+        # Clear the bottom area first
+        for y in range(h-3, h):
+            self.stdscr.move(y, 0)
+            self.stdscr.clrtoeol()
+        
+        # Display prompt
+        self.stdscr.addstr(h-3, 2, prompt)
+        self.stdscr.refresh()
+        
+        # Create a dedicated window for text input
+        edit_win = curses.newwin(1, w-10, h-2, 5)
+        edit_win.keypad(True)  # Enable special keys
+        
+        # Initialize editing with the initial text
+        editing_text = initial_text
+        cursor_pos = len(editing_text)
+        
+        # Enable cursor visibility
+        curses.curs_set(1)
+        
+        # Track last key for escape sequences
+        last_key = -1
+        
+        # Process key inputs for the edit window
+        while True:
+            # Display the current text with horizontal scrolling if needed
+            max_display_width = w - 15
+            
+            # Calculate display offset for horizontal scrolling
+            display_offset = 0
+            if cursor_pos >= max_display_width:
+                display_offset = cursor_pos - max_display_width + 10
+            
+            # Get the visible portion of the text
+            visible_text = editing_text[display_offset:display_offset + max_display_width]
+            visible_cursor_pos = cursor_pos - display_offset
+            
+            # Display the current text
+            edit_win.clear()
+            if visible_text:
+                edit_win.addstr(0, 0, visible_text)
+            edit_win.move(0, visible_cursor_pos)  # Position cursor
+            edit_win.refresh()
+            
+            # Get key input
+            ch = edit_win.getch()
+            
+            # Handle escape sequences for Ctrl combinations
+            if last_key == 27:  # ESC sequence
+                if ch == ord('['):
+                    # Start of control sequence, get the next character
+                    next_ch = edit_win.getch()
+                    if next_ch == ord('1'):
+                        # Ctrl+Arrow sequences
+                        semicolon = edit_win.getch()  # Should be ';'
+                        if semicolon == ord(';'):
+                            modifier = edit_win.getch()  # Should be '5'
+                            if modifier == ord('5'):
+                                direction = edit_win.getch()
+                                if direction == ord('C'):  # Ctrl+Right
+                                    cursor_pos = self._find_word_boundary_right(editing_text, cursor_pos)
+                                elif direction == ord('D'):  # Ctrl+Left
+                                    cursor_pos = self._find_word_boundary_left(editing_text, cursor_pos)
+                    elif next_ch == ord('C'):  # Right arrow
+                        cursor_pos = min(len(editing_text), cursor_pos + 1)
+                    elif next_ch == ord('D'):  # Left arrow
+                        cursor_pos = max(0, cursor_pos - 1)
+                    elif next_ch == ord('H'):  # Home
+                        cursor_pos = 0
+                    elif next_ch == ord('F'):  # End
+                        cursor_pos = len(editing_text)
+                    elif next_ch == ord('3'):  # Delete key sequence
+                        tilde = edit_win.getch()  # Should be '~'
+                        if tilde == ord('~') and cursor_pos < len(editing_text):
+                            editing_text = editing_text[:cursor_pos] + editing_text[cursor_pos+1:]
+                last_key = -1
+                continue
+            
+            # Handle key presses
+            if ch == curses.KEY_ENTER or ch == 10 or ch == 13:  # Enter key
+                break
+            elif ch == 27:  # Escape key - could be start of sequence or cancel
+                # Check if there's another character immediately following
+                edit_win.nodelay(True)
+                next_ch = edit_win.getch()
+                edit_win.nodelay(False)
+                
+                if next_ch == -1:  # No following character, treat as cancel
+                    editing_text = initial_text  # Revert to original
+                    break
+                else:  # Part of escape sequence
+                    last_key = 27
+                    # Put the character back for processing
+                    if next_ch == ord('['):
+                        # Handle the '[' in the next iteration
+                        ch = next_ch
+                        last_key = 27
+                        continue
+            elif ch == 8 or ch == 127:  # Ctrl+H or regular backspace
+                if cursor_pos > 0:
+                    editing_text = editing_text[:cursor_pos-1] + editing_text[cursor_pos:]
+                    cursor_pos -= 1
+            elif ch == 23:  # Ctrl+W - delete word backward
+                new_pos = self._find_word_boundary_left(editing_text, cursor_pos)
+                editing_text = editing_text[:new_pos] + editing_text[cursor_pos:]
+                cursor_pos = new_pos
+            elif ch == curses.KEY_BACKSPACE:  # Backspace key
+                if cursor_pos > 0:
+                    editing_text = editing_text[:cursor_pos-1] + editing_text[cursor_pos:]
+                    cursor_pos -= 1
+            elif ch == curses.KEY_DC:  # Delete key
+                if cursor_pos < len(editing_text):
+                    editing_text = editing_text[:cursor_pos] + editing_text[cursor_pos+1:]
+            elif ch == curses.KEY_LEFT:  # Left arrow
+                cursor_pos = max(0, cursor_pos - 1)
+            elif ch == curses.KEY_RIGHT:  # Right arrow
+                cursor_pos = min(len(editing_text), cursor_pos + 1)
+            elif ch == curses.KEY_HOME or ch == 1:  # Home key or Ctrl+A
+                cursor_pos = 0
+            elif ch == curses.KEY_END or ch == 5:  # End key or Ctrl+E
+                cursor_pos = len(editing_text)
+            elif ch == 21:  # Ctrl+U - delete from cursor to beginning of line
+                editing_text = editing_text[cursor_pos:]
+                cursor_pos = 0
+            elif ch == 11:  # Ctrl+K - delete from cursor to end of line
+                editing_text = editing_text[:cursor_pos]
+            elif ch == 2:  # Ctrl+B - move left by word
+                cursor_pos = self._find_word_boundary_left(editing_text, cursor_pos)
+            elif ch == 6:  # Ctrl+F - move right by word
+                cursor_pos = self._find_word_boundary_right(editing_text, cursor_pos)
+            elif 32 <= ch <= 126:  # Printable characters
+                editing_text = editing_text[:cursor_pos] + chr(ch) + editing_text[cursor_pos:]
+                cursor_pos += 1
+            
+            last_key = ch
+        
+        # Restore cursor visibility setting
+        curses.curs_set(0)
+        
+        return editing_text
 
 def main(stdscr):
     # Set up signal handler for SIGINT (Ctrl+C)
